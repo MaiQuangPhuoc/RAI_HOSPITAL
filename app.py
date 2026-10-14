@@ -15,6 +15,8 @@ import colorsys
 import io
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
 import streamlit as st
@@ -122,6 +124,7 @@ def _lum(hexrgb):
     return (0.299 * r + 0.587 * g + 0.114 * b) / 255
 
 
+@lru_cache
 def _tint(hexrgb, tint):
     r, g, b = (int(hexrgb[i:i + 2], 16) / 255 for i in (0, 2, 4))
     h, l, s = colorsys.rgb_to_hls(r, g, b)
@@ -243,18 +246,21 @@ const FR=__FR__;
 const pl=document.getElementById('pl'),pr=document.getElementById('pr'),sp=document.getElementById('sp'),
       panes=document.getElementById('panes'),nb=document.getElementById('nb'),fx=document.getElementById('fx');
 
-function layout(){                       // 2 khung cao bằng nhau + vị trí dòng bị khóa
+function layout(){
   const L=[...document.querySelectorAll('#tl tr')],R=[...document.querySelectorAll('#tr tr')];
-  [...L,...R].forEach(t=>t.style.height=t.dataset.h+'px');
-  L.forEach((t,i)=>{const o=R[i];if(!o)return;
-    const h=Math.max(t.getBoundingClientRect().height,o.getBoundingClientRect().height);
-    t.style.height=h+'px';o.style.height=h+'px';});
-  for(let i=0;i<=FR;i++)[L[i],R[i]].forEach(tr=>{if(!tr)return;
-    tr.querySelectorAll('.fr').forEach(x=>x.style.top=tr.offsetTop+'px');});
+  L.concat(R).forEach(t=>t.style.height=t.dataset.h+'px');
+  const hs=L.map((t,i)=>Math.max(t.offsetHeight,R[i]?R[i].offsetHeight:0));
+  L.forEach((t,i)=>{t.style.height=hs[i]+'px';if(R[i])R[i].style.height=hs[i]+'px';});
+  let top=0;
+  for(let i=0;i<=FR;i++){
+    [L[i],R[i]].forEach(tr=>{if(tr)tr.querySelectorAll('.fr').forEach(x=>x.style.top=top+'px');});
+    top+=hs[i];
+  }
 }
-function fit(){                          // iframe cao gần hết màn hình
+let raf=0;function relayout(){cancelAnimationFrame(raf);raf=requestAnimationFrame(layout);}
+function fit(){
   try{const f=window.frameElement;if(f){const h=Math.max(560,window.parent.innerHeight-110);
-      f.style.height=h+'px';f.height=h;}}catch(e){}
+    if(Math.abs(f.offsetHeight-h)>2){f.style.height=h+'px';f.height=h;}}}catch(e){}
 }
 pr.addEventListener('scroll',()=>{pl.scrollTop=pr.scrollTop;});
 pl.addEventListener('wheel',e=>{                       // lăn chuột ở khung trái -> cuộn dọc cả 2 khung
@@ -274,17 +280,18 @@ panes.addEventListener('click',e=>{const td=e.target.closest('td');if(td)pick(td
 
 window.addEventListener('message',e=>{                  // nút "lên đầu trang" ở góc phải dưới
   if(e.data==='kd-scroll-top'){pr.scrollTo({top:0,behavior:'smooth'});pl.scrollTo({top:0,behavior:'smooth'});}});
-window.addEventListener('resize',()=>{fit();layout();});
+window.addEventListener('resize',()=>{fit();relayout();});
+if(document.fonts)document.fonts.ready.then(relayout);
 fit();layout();
 const first=document.querySelector('td[data-ref]');if(first)pick(first);
 </script>"""
 
 
-def sheet_to_html(ws, dark=False, min_rows=20):
+def sheet_to_html(ws, last_row, min_rows=20):
     """Vẽ sheet thành 2 khung (trái = cột A-F, phải = G...), ô gộp, viền, màu, dòng lẻ tô màu."""
     pal = theme_palette(ws.parent)
-    n_rows, n_cols = max(ws.max_row, min_rows), ws.max_column
-    last_val = max((c.row for row in ws.iter_rows() for c in row if c.value is not None), default=0)
+    n_rows, n_cols = max(last_row + 5, min_rows), ws.max_column
+    last_val = last_row
 
     widths = {}
     for cd in ws.column_dimensions.values():
@@ -392,8 +399,7 @@ def sheet_to_html(ws, dark=False, min_rows=20):
     left_html = render(1, left_to, True, 'tl')
     right_html = render(left_to + 1, n_cols, False, 'tr') if n_cols > left_to else '<table id="tr"></table>'
 
-    return (excel_css(dark)
-            + '<div class="fxbar"><div class="nb"><span id="nb">A1</span><i>▼</i></div>'
+    return ('<div class="fxbar"><div class="nb"><span id="nb">A1</span><i>▼</i></div>'
               '<div class="fxi">fx</div><div id="fx"></div></div>'
             + f'<div class="panes" id="panes"><div class="pane" id="pl">{left_html}</div>'
               f'<div class="split" id="sp" title="左右の比率をドラッグして調整"></div>'
@@ -497,7 +503,7 @@ h1{{font-weight:700;letter-spacing:-0.5px}}
 
 
 def build(items, dicts):
-    """items: [(số, tên file)]. Trả về bytes xlsx."""
+    """items: [(số, tên file)]. Trả về bytes xlsx và HTML của sheet."""
     wb = load_workbook(find_template())
     ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb.active
     keys = header_keys(ws)
@@ -513,9 +519,15 @@ def build(items, dicts):
                     ws.cell(row=r, column=col, value=v)
             r += 1
 
+    last_row = r - 1
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue()
+    return buf.getvalue(), sheet_to_html(ws, last_row)
+
+
+def make(items):
+    """Chạy nền: tạo xlsx + HTML. Không gọi st.* trong hàm này."""
+    return build(items, load_dicts(find_dic())) if items else (None, None)
 
 
 def main():
@@ -547,32 +559,29 @@ def main():
             else:
                 items.append((n, f.name))
 
-        total = SECONDS_PER_FILE * len(files)             # thời gian chờ giả lập
+        total = SECONDS_PER_FILE * len(files)
         bar = st.progress(0.0, text='処理中...')
-        with st.spinner('データを読み込んでいます...'):
-            for s in range(1, total + 1):
-                time.sleep(1)
-                bar.progress(s / total, text=f'処理中... {s}/{total}s')
-        bar.empty()
-
         try:
-            data = build(items, load_dicts(find_dic())) if items else None
-            st.session_state['result'] = (data, errors)
+            with ThreadPoolExecutor(max_workers=1) as ex, st.spinner('データを読み込んでいます...'):
+                fut = ex.submit(make, items)
+                for s in range(1, total + 1):
+                    time.sleep(1)
+                    bar.progress(s / total, text=f'処理中... {s}/{total}s')
+                data, sheet = fut.result()
+            st.session_state['result'] = (data, sheet, errors)
         except Exception as e:                            # thiếu file, sai path, sai sheet...
             st.session_state['result'] = None
             st.error(f'エラー: {e!r}')
+        bar.empty()
 
     res = st.session_state.get('result')
     if res:
-        data, errors = res
+        data, sheet, errors = res
         for e in errors:
             st.warning(e)
         if data is not None:
             st.subheader('結果シート')
-            # vẽ lại từ bytes xlsx -> đổi sáng/tối không cần xử lý lại
-            wb = load_workbook(io.BytesIO(data))
-            ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb.active
-            components.html(sheet_to_html(ws, dark=dark), height=760)
+            components.html(excel_css(dark) + sheet, height=760)
             st.download_button('⬇ XLSXをダウンロード', data, file_name=RESULT_NAME,
                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
