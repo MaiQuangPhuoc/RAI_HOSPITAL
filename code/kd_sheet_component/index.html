@@ -1,0 +1,94 @@
+<!doctype html><html><head><meta charset="utf-8"></head>
+<body style="margin:0"><div id="root" style="display:contents"></div>
+<script>
+const P=(type,extra)=>window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},extra||{}),'*');
+const $=id=>document.getElementById(id);
+let sig=null,edits={},FR=3,lastH=0;
+const send=()=>P('streamlit:setComponentValue',{value:edits,dataType:'json'});
+function setTheme(css){
+  let style=$('theme-style');
+  if(!style){style=document.createElement('style');style.id='theme-style';document.head.appendChild(style);}
+  const text=css.replace(/^<style>/,'').replace(/<\/style>$/,'');
+  if(style.textContent!==text){style.textContent=text;relayout();}
+}
+
+function layout(){                                   // ghi -> đọc 1 lượt -> ghi (không reflow lặp)
+  const L=[...document.querySelectorAll('#tl tr')],R=[...document.querySelectorAll('#tr tr')];
+  L.concat(R).forEach(t=>t.style.height=t.dataset.h+'px');
+  const hs=L.map((t,i)=>Math.max(t.offsetHeight,R[i]?R[i].offsetHeight:0));
+  L.forEach((t,i)=>{t.style.height=hs[i]+'px';if(R[i])R[i].style.height=hs[i]+'px';});
+  let top=0;
+  for(let i=0;i<=FR;i++){
+    [L[i],R[i]].forEach(tr=>{if(tr)tr.querySelectorAll('.fr').forEach(x=>x.style.top=top+'px');});
+    top+=hs[i]||0;
+  }
+}
+let raf=0;const relayout=()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(layout);};
+function fit(){
+  let h=760;try{h=Math.max(560,Math.min(window.parent.innerHeight-130,900));}catch(e){}
+  if(h!==lastH){lastH=h;P('streamlit:setFrameHeight',{height:h});}
+}
+function pick(td){
+  document.querySelectorAll('td.sel').forEach(x=>x.classList.remove('sel'));
+  td.classList.add('sel');$('nb').textContent=td.dataset.ref;$('fx').textContent=td.innerText;
+}
+
+document.addEventListener('scroll',e=>{                     // 2 khung cuộn dọc cùng nhau
+  if(e.target.id==='pr'){const pl=$('pl');if(pl)pl.scrollTop=e.target.scrollTop;}},true);
+document.addEventListener('wheel',e=>{
+  const pl=e.target.closest&&e.target.closest('#pl');if(!pl)return;
+  if(e.shiftKey)pl.scrollLeft+=e.deltaY;else $('pr').scrollTop+=e.deltaY;
+  e.preventDefault();},{passive:false});
+
+let drag=false;                                             // kéo thanh giữa
+document.addEventListener('mousedown',e=>{
+  if(e.target.id!=='sp')return;drag=true;e.target.classList.add('on');
+  document.body.style.userSelect='none';e.preventDefault();});
+document.addEventListener('mousemove',e=>{
+  if(!drag)return;const r=$('panes').getBoundingClientRect();
+  $('pl').style.width=Math.min(Math.max(e.clientX-r.left,180),r.width-260)+'px';});
+document.addEventListener('mouseup',()=>{
+  if(!drag)return;drag=false;$('sp').classList.remove('on');document.body.style.userSelect='';layout();});
+
+document.addEventListener('click',e=>{                      // click ô: chọn; ô dòng lẻ: bắt đầu nhập
+  const td=e.target.closest&&e.target.closest('#panes td');if(!td)return;pick(td);
+  if(td.classList.contains('ed')&&td.contentEditable!=='true'){
+    td.dataset.p=td.innerText;td.contentEditable='true';td.focus();
+    const rg=document.createRange();rg.selectNodeContents(td);rg.collapse(false);
+    const s=getSelection();s.removeAllRanges();s.addRange(rg);
+  }});
+document.addEventListener('input',e=>{
+  if(e.target.classList&&e.target.classList.contains('ed'))$('fx').textContent=e.target.innerText;});
+document.addEventListener('keydown',e=>{
+  const td=e.target;if(!td.classList||!td.classList.contains('ed'))return;
+  if(e.key==='Enter'){e.preventDefault();td.blur();}
+  else if(e.key==='Escape'){td.innerText=td.dataset.p||'';td.blur();}});
+document.addEventListener('focusout',e=>{                   // rời ô: lưu thay đổi, gửi về Python
+  const td=e.target;if(!td.classList||!td.classList.contains('ed'))return;
+  td.contentEditable='false';
+  const t=td.innerText.replace(/\n+$/,''),k=td.dataset.r+','+td.dataset.c,before=edits[k];
+  if(t!==(td.dataset.o||'')){edits[k]=t;td.classList.add('chg');}
+  else{delete edits[k];td.classList.remove('chg');}
+  if(edits[k]!==before)send();});
+
+window.addEventListener('message',e=>{
+  if(e.data==='kd-scroll-top'){                             // nút ↑ ở góc phải dưới
+    const pr=$('pr'),pl=$('pl');if(pr)pr.scrollTo({top:0,behavior:'smooth'});
+    if(pl)pl.scrollTo({top:0,behavior:'smooth'});return;}
+  const d=e.data;if(!d||d.type!=='streamlit:render')return;
+  const a=d.args;
+  setTheme(a.css);                                          // đổi theme mà không dựng lại/mất edits
+  if(a.sig!==sig){                                          // chỉ dựng lại khi đổi kết quả
+    sig=a.sig;FR=a.fr;edits=Object.assign({},a.init||{});
+    $('root').innerHTML=a.html;
+    for(const k in edits){const p=k.split(',');
+      const td=document.querySelector('td.ed[data-r="'+p[0]+'"][data-c="'+p[1]+'"]');
+      if(td){td.innerText=edits[k];td.classList.add('chg');}}
+    const first=document.querySelector('td[data-ref]');if(first)pick(first);
+    fit();layout();
+    if(document.fonts)document.fonts.ready.then(relayout);
+  }else fit();
+});
+window.addEventListener('resize',()=>{fit();relayout();});
+P('streamlit:componentReady',{apiVersion:1});
+</script></body></html>

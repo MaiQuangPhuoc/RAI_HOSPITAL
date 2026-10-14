@@ -1,0 +1,16 @@
+## chay tuần tự các lệnh sau trong terminal 
+
+pip install streamlit pandas openpyxl
+
+python -m pip install streamlit pandas openpyxl
+
+
+
+## sau đó chạy tuần tự lệnh sau để chạy demo 
+cd code
+python -m streamlit run app.py
+
+## lưu ý : file.pdf input phải có số trong name-file , ví dụ 
+- abc_1 hoặc xxx_1 ==> được hiểu là file 1 
+- xxx_2 ===> file 2
+
